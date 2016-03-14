@@ -1,2 +1,2 @@
 # learn-esper
-Demo project for Introduction to Esper blog post
+Demo code for Esper blog post
