@@ -1,0 +1,718 @@
+Tìm hiểu về Esper engine
+
+===
+Phần 1: Khái niệm.
+
+Esper là một bộ engine để giải quyết các vấn đề về stream processing (ESP) và complex event processor (CEP) được viết bằng Java và hoàn toàn là open source.
+Xem thêm về ESP và CEP ở đây (hai từ này không biết dịch ra tiếng Việt thế nào)
+https://en.wikipedia.org/wiki/Event_stream_processing
+https://en.wikipedia.org/wiki/Complex_event_processing
+
+Như ta đã biết với mô hình cơ sở dữ liệu quan hệ truyền thống, ta phải lưu trữ dữ liệu và ổ cứng, và muốn lấy dữ liệu ra thì ta phải truy vấn  dữ liệu với những câu lệnh SQL khác nhau. Vấn đề ở đây là nếu một hệ thống muốn truy vấn thông tin theo thời gian thực thì là ta phải truy vấn liên tục vào DB với tần suất lớn, điều này gây áp lực rất lớn lên CSDL, nếu không được thiết kế tốt CSDL rất dễ bị "down" gây sụp đổ hệ thống.
+
+[IMG]systemerroroccured.png[/IMG]
+
+Esper engine ra đời để khắc phục vấn đề trên, trái ngược với DB là lưu dữ liệu và chạy các câu truy vấn để lấy ngược lại dữ liệu, thì với Esper thì nó lại lưu trữ các câu truy vấn và đẩy dữ liệu đi qua các câu truy vấn đó. Tức là data sẽ được gửi real-time cho Esper và mỗi khi có một dữ liệu hợp lệ với câu truy vấn đã được lưu trữ đó thì một "event" sẽ được triệu gọi.
+Các câu truy vấn được lưu trữ trên được gọi là Event Processing Language (EPL) nó rất gần gũi với các câu lệnh truy vấn SQL thông thường, nên các developer rất dễ tiếp cận với nó. 
+
+[IMG]products_esp_cep.jpeg[/IMG]
+
+Nói tóm lại Esper được phát triển để giải quyết các yêu cầu về các ứng dụng phân tích và phản ứng với các sự kiện đang diễn ra với thời gian thực ví dự như các hệ thống về tài chính (chứng khoán, hay ngoại hối), hay các hệ thống giám sát mạng hay mạng cảm biến với các điều kiện như:
+- High throughput: Ứng dụng phải xử lý được số lượng lớn thông điệp (message) gửi đến (từ 1000 cho đến 100k message trên một giây)
+- Low latency: Độ trễ thấp tức là thời gian xử lý một thông điệp rất thấp (từ vài milliseconds cho đến một vài seconds trên một message)
+- Complex computations: Có khả năng xử lý tính toán phức tạp, như lọc message, tổng hợp thời gian, kích hoạt nhiều sự kiện có liên quan đến nhau cùng một lúc ...
+
+===
+Phần 2: Ứng dụng.
+
+OK vậy ta đã hiểu sơ sơ thế nào là Esper và nó dùng trong trường hợp nào, vậy phần này ta đi sâu vào việc làm thế nào để bắt đầu với Esper và giải quyết một bài toán thực tế như thế nào?
+
+Ta hãy sét một bài toán sau: Một hệ thống chứng khoán của công ty ABC cần thêm một vài bộ lệnh thuật toán như lệnh xu hướng (Trailing Order), lệnh dừng (Stop loss take profit order) hay lệnh chờ (Stop Entry Order).
+Về điểm chung thì các bộ lệnh thuật toán (order strategy) kia là đều phải nhận các tín hiệu của thị trường (ở đây là giá chứng khoán) về rồi tính toán để gửi lệnh của người đầu tư một cách "tự động" lền sàn.
+
+Ở đây ta sẽ thiết kế mỗi lệnh là một câu truy vấn kiểu EPL cắm thẳng vào Esper engine và luồng dữ liệu gửi real-time chính là tính hiệu của thị trường (rate),mỗi EPL sẽ có một hoặc nhiều "listener" để giúp kích hoạt lệnh mỗi khi có một tín hiệu phù hợp được gửi đến như hình sau
+
+[IMG]Esper Flow Chart.png[IMG]
+Hình minh họa 1.1
+
+Để cho đơn giản chúng ta sẽ thực hiện một lệnh thuật toán đơn giản nhất là lệnh STO (Stop loss take profit order) hay tiếng Việt gọi là "cắt lỗ chốt lời".
+Để bắt đầu ta sẽ tạo hai Java Object Events như sau để mô tả hai thực thể của chúng ta là Order (lệnh đặt) của nhà đầu tư và thông tin thị trường (Stock)
+
+Order
+[code]
+public class Order {
+	private String userId;
+	private String acctNo;
+	private String symbol;
+	private Long qtty;
+	private Long price;
+	private String strategyType;
+	private Long stopPrice;
+	private Long takePrice;
+	private String orderId;
+
+	@Override
+	public String toString() {
+		return "acctNo: " + acctNo.toString() + " - userId: " + userId.toString()
+				+ " - buy price: " + price.toString()
+				+ " - symbol: " + symbol.toString() + " - stopPrice: " + stopPrice.toString()
+				+ " - takePrice: " + takePrice.toString() + " - qtty: " + qtty.toString();
+	}
+
+	/**
+	 * @return the userId
+	 */
+	public String getUserId() {
+		return userId;
+	}
+
+	/**
+	 * @param userId the userId to set
+	 */
+	public void setUserId(String userId) {
+		this.userId = userId;
+	}
+
+	/**
+	 * @return the acctNo
+	 */
+	public String getAcctNo() {
+		return acctNo;
+	}
+
+	/**
+	 * @param acctNo the acctNo to set
+	 */
+	public void setAcctNo(String acctNo) {
+		this.acctNo = acctNo;
+	}
+
+	/**
+	 * @return the symbol
+	 */
+	public String getSymbol() {
+		return symbol;
+	}
+
+	/**
+	 * @param symbol the symbol to set
+	 */
+	public void setSymbol(String symbol) {
+		this.symbol = symbol;
+	}
+
+	/**
+	 * @return the qtty
+	 */
+	public Long getQtty() {
+		return qtty;
+	}
+
+	/**
+	 * @param qtty the qtty to set
+	 */
+	public void setQtty(Long qtty) {
+		this.qtty = qtty;
+	}
+
+	/**
+	 * @return the price
+	 */
+	public Long getPrice() {
+		return price;
+	}
+
+	/**
+	 * @param price the price to set
+	 */
+	public void setPrice(Long price) {
+		this.price = price;
+	}
+
+	/**
+	 * @return the strategyType
+	 */
+	public String getStrategyType() {
+		return strategyType;
+	}
+
+	/**
+	 * @param strategyType the strategyType to set
+	 */
+	public void setStrategyType(String strategyType) {
+		this.strategyType = strategyType;
+	}
+
+	/**
+	 * @return the stopPrice
+	 */
+	public Long getStopPrice() {
+		return stopPrice;
+	}
+
+	/**
+	 * @param stopPrice the stopPrice to set
+	 */
+	public void setStopPrice(Long stopPrice) {
+		this.stopPrice = stopPrice;
+	}
+
+	/**
+	 * @return the takePrice
+	 */
+	public Long getTakePrice() {
+		return takePrice;
+	}
+
+	/**
+	 * @param takePrice the takePrice to set
+	 */
+	public void setTakePrice(Long takePrice) {
+		this.takePrice = takePrice;
+	}
+
+	/**
+	 * @return the orderId
+	 */
+	public String getOrderId() {
+		return orderId;
+	}
+
+	/**
+	 * @param orderId the orderId to set
+	 */
+	public void setOrderId(String orderId) {
+		this.orderId = orderId;
+	}
+}
+[/code]
+
+Và Stock
+[code]
+public class Stock {
+	private String symbol;
+	private String exchange;
+	private Long priceCE;
+	private Long priceFL;
+	private Long priceRF;
+
+	@Override
+	public String toString() {
+		return "Symbol: " + symbol + " - priceRF: " + priceRF;
+
+	}
+
+	/**
+	 * @return the symbol
+	 */
+	public String getSymbol() {
+		return symbol;
+	}
+
+	/**
+	 * @param symbol the symbol to set
+	 */
+	public void setSymbol(String symbol) {
+		this.symbol = symbol;
+	}
+
+	/**
+	 * @return the exchange
+	 */
+	public String getExchange() {
+		return exchange;
+	}
+
+	/**
+	 * @param exchange the exchange to set
+	 */
+	public void setExchange(String exchange) {
+		this.exchange = exchange;
+	}
+
+	/**
+	 * @return the priceCE
+	 */
+	public Long getPriceCE() {
+		return priceCE;
+	}
+
+	/**
+	 * @param priceCE the priceCE to set
+	 */
+	public void setPriceCE(Long priceCE) {
+		this.priceCE = priceCE;
+	}
+
+	/**
+	 * @return the priceFL
+	 */
+	public Long getPriceFL() {
+		return priceFL;
+	}
+
+	/**
+	 * @param priceFL the priceFL to set
+	 */
+	public void setPriceFL(Long priceFL) {
+		this.priceFL = priceFL;
+	}
+
+	/**
+	 * @return the priceRF
+	 */
+	public Long getPriceRF() {
+		return priceRF;
+	}
+
+	/**
+	 * @param priceRF the priceRF to set
+	 */
+	public void setPriceRF(Long priceRF) {
+		this.priceRF = priceRF;
+	}
+
+}
+[/code]
+
+OK, giờ ta hãy tạo một lớp là STOEngine để setup một engine
+
+[code]
+import com.espertech.esper.client.Configuration;
+import com.espertech.esper.client.EPAdministrator;
+import com.espertech.esper.client.EPRuntime;
+import com.espertech.esper.client.EPServiceProvider;
+import com.espertech.esper.client.EPServiceProviderManager;
+import com.iamvtn.esper.model.Stock;
+
+public class STOEngine {
+	private static STOEngine instance = null;
+
+	public static STOEngine getInstance() {
+		if (instance == null) {
+			instance = new STOEngine();
+		}
+		return instance;
+	}
+
+	EPServiceProvider cep;
+	EPRuntime cepRT;
+	EPAdministrator cepAdm;
+
+	public STOEngine() {
+		Configuration cepConfig = new Configuration();
+		// We register Stock as objects the engine will have to handle
+		cepConfig.addEventType("Stock", Stock.class.getName());
+
+		// We setup the engine
+		cep = EPServiceProviderManager.getProvider("stoEngine", cepConfig);
+		cepRT = cep.getEPRuntime();
+		cepAdm = cep.getEPAdministrator();
+	}
+
+	/**
+	 * @return the cep
+	 */
+	public EPServiceProvider getCep() {
+		return cep;
+	}
+
+	/**
+	 * @return the cepRT
+	 */
+	public EPRuntime getCepRT() {
+		return cepRT;
+	}
+
+	/**
+	 * @return the cepAdm
+	 */
+	public EPAdministrator getCepAdm() {
+		return cepAdm;
+	}
+}
+[/code]
+
+Bạn có thể thấy code trên ta có dòng 
+[code]
+cepConfig.addEventType("Stock", Stock.class.getName());
+[/code]
+Dòng này có ý nghĩa là chúng ta sẽ thêm một "Event Type", khi đó Esper sẽ convert những dữ liệu chạy qua engine thành các POJO ví dự như bên trên tôi convert thông tin chứng khoán vào Java Object Stock, ở đây chúng ta có thể add nhiều Event Type vào một engine.
+Ngoài ra đáng chú ý nhất là lớp EPAdministrator, lớp này sẽ tạo ra và quản lý các Statement EPL.
+
+OK như hình minh họa 1.1 trên thì ta đã khởi tạo thành công một Esper engine, giờ tiếp theo là hãy tạo ra các Strategy (các EPL)
+
+Ở đây tôi tạo một Strategy cho lệnh STO như sau: 
+[code]
+import com.espertech.esper.client.EPStatement;
+import com.iamvtn.esper.constants.CommonConstant;
+import com.iamvtn.esper.engine.STOEngine;
+import com.iamvtn.esper.listener.STOListener;
+import com.iamvtn.esper.model.Order;
+
+public class STOStrategy {
+	private static STOStrategy instance = null;
+
+	public static synchronized STOStrategy getInstance() {
+		if (instance == null) {
+			instance = new STOStrategy();
+		}
+		return instance;
+	}
+
+	static EPStatement stoStatement;
+
+	public void run(Order order) {
+		System.out.println("Received  :" + order.toString());
+
+		if (order.getStrategyType().equals(CommonConstant.STOPLOSS_TAKEPROFIT_ORDER)) {
+			stoStatement = STOEngine.getInstance().getCepAdm().createEPL(
+					" SELECT * FROM Stock(symbol='" + order.getSymbol() + "') WHERE priceRF <= " + order.getStopPrice() + " OR priceRF >= " + order.getTakePrice());
+		} else if (order.getStrategyType().equals(CommonConstant.TAKEPROFIT_ORDER)) {
+			stoStatement = STOEngine.getInstance().getCepAdm().createEPL(
+					" SELECT * FROM Stock(symbol='" + order.getSymbol() + "') WHERE priceRF >= " + order.getTakePrice());
+		} else if (order.getStrategyType().equals(CommonConstant.STOPLOSS_ORDER)) {
+			stoStatement = STOEngine.getInstance().getCepAdm().createEPL(
+					" SELECT * FROM Stock(symbol='" + order.getSymbol() + "') WHERE priceRF <= " + order.getStopPrice());
+		}
+
+		STOListener stoListener = new STOListener(order);
+		stoStatement.addListener(stoListener);
+
+		System.out.println("Start STO strategy" + stoStatement.getText());
+	}
+}
+[/code]
+
+Ở đây ta hãy chú ý đến lớp EPStatement, lớp này giúp chúng ta kích hoạt một Esper EPL trên nên Esper engine.
+[code]
+ SELECT * FROM Stock(symbol='" + order.getSymbol() + "') WHERE priceRF <= " + order.getStopPrice() + " OR priceRF >= " + order.getTakePrice()
+[/code]
+Câu EPL này sẽ querry liên tục thông tin thị trường được Esper nhận được, nếu nó thỏa mãn với 3 điều kiện tôi querry bên trên thì Listener sẽ được triệu gọi (theo nghiệp vụ của lệnh STO).
+Các viết Esper EPL rất gần gũi với SQL bạn có thể tìm hiểu chi tiết ở đây: http://www.espertech.com/esper/solution_patterns.php
+
+OK như hình minh họa 1.1 ta cũng đã khởi tạo thành công các Strategy (EPL)
+
+Giờ hãy để ý đến dòng code sau: 
+[code]
+	STOListener stoListener = new STOListener(order);
+	stoStatement.addListener(stoListener);
+[/code]
+Đó chính là đoạn ta thêm một hoặc nhiều các Listener vào một Esper EPL. Listener này sẽ được triệu gọi khi EPL tìm được dữ liệu thỏa mãn.
+
+Ngoài ra Để quản lý các EPL ta có thể sử dụng EPAdministrator để lấy ra các EPL name qua hàm getStatementNames() và từ đó lấy ra được từng EPL thông qua hàm getStatement(String), từ đó ta có thể lấy ra được chi tiết các Listener đang lắng nghe từ EPL hoặc có thể destroy chính EPL đó ra khỏi Esper engine
+
+[code]
+import com.espertech.esper.client.EPServiceProvider;
+import com.espertech.esper.client.EPStatement;
+import com.espertech.esper.client.EventBean;
+import com.espertech.esper.client.StatementAwareUpdateListener;
+import com.iamvtn.esper.model.Order;
+import com.iamvtn.esper.model.Stock;
+
+public class STOListener implements StatementAwareUpdateListener {
+	Order orderEvent = new Order();
+
+	public STOListener(Order orderEvent) {
+		this.orderEvent = orderEvent;
+	}
+
+	public void update(EventBean[] newData, EventBean[] oldData, EPStatement epStatement, EPServiceProvider epServiceProvider) {
+		if (newData != null) {
+			Stock rateEvent = (Stock) newData[newData.length - 1].getUnderlying();
+
+			if (orderEvent.getTakePrice() != null && orderEvent.getTakePrice() > 0
+					&& rateEvent.getPriceRF() >= orderEvent.getTakePrice()) {
+				System.out.println(" ********************** ");
+				System.out.println(" - TakeProfitOrderListener received: ");
+			} else if (orderEvent.getStopPrice() != null && orderEvent.getStopPrice() > 0
+					&& rateEvent.getPriceRF() <= orderEvent.getStopPrice()) {
+				System.out.println(" ********************** ");
+				System.out.println(" - StopLossOrderListener received: ");
+			}
+
+			System.out.println(" - Rate: " + rateEvent.toString());
+			System.out.println(" - Order: " + orderEvent.toString());
+			System.out.println(" ********************** ");
+
+			epStatement.removeListener(this);
+		}
+	}
+}
+[/code]
+Đoạn code trên chúng ta đã hiển thị ra màn hình cụ thể các lệnh người dùng đặt, câu lệnh EPL và dữ liệu thỏa mãn mà EPL "bắt" được.
+
+Ngoài ra chúng ta implements tới giao diện StatementAwareUpdateListener, nhờ giao diện này ta có thể sử dụng EPStatement của Listener đó để xóa bỏ một Listener ra khỏi EPL hoặc destroy cả EPL đó đi, để tránh trường hợp gửi đi nhiều lệnh của KH (rất nguy hiểm)
+
+Phù vậy là ta cũng đã tạo xong một lệnh STO trong chứng khoán rất đơn giản bằng cách sử dụng Esper engine, giờ viết một lớp test một hàm main để test coi.
+Đầu tiên là hàm StockSender để giả lập thông tin thị trường gửi đến Esper
+[code]
+import java.util.Random;
+
+import com.iamvtn.esper.engine.STOEngine;
+import com.iamvtn.esper.model.Stock;
+
+public class StockSender implements Runnable {
+	private static StockSender instance = null;
+
+	public static StockSender getInstance() {
+		if (instance == null) {
+			instance = new StockSender();
+		}
+		return instance;
+	}
+
+	private static Random generator = new Random();
+
+	public static String symbol;
+	public static Long from;
+	public static Long to;
+
+	public static Stock GenerateRandomRate(String symbol, Long from, Long to) {
+		// Insert Dummy Data
+		Long price = genRandomLong(from, to, generator);
+		Stock rate = new Stock();
+		rate.setPriceRF(price);
+		rate.setSymbol(symbol);
+
+		return rate;
+	}
+
+	public static Long genRandomLong(Long aStart, Long aEnd, Random aRandom) {
+		if (aStart > aEnd) {
+			throw new IllegalArgumentException("Start cannot exceed End.");
+		}
+		// get the range, casting to long to avoid overflow problems
+		long range = (long) aEnd - (long) aStart + 1;
+		// compute a fraction of the range, 0 <= frac < range
+		long fraction = (long) (range * aRandom.nextDouble());
+		long randomNumber = (long) (fraction + aStart);
+		return randomNumber;
+	}
+
+	public void run() {
+		while (true) {
+			Stock stock = GenerateRandomRate(symbol, from, to);
+
+			// TODO send stock to Esper.
+			STOEngine.getInstance().getCepRT().sendEvent(stock);
+		}
+	}
+}
+[code]
+
+Sau đó ta viết một hàm OrderSender để có giao diện Console đơn giản để người dùng nhập lệnh bằng tay:
+[code]
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+
+import com.iamvtn.esper.event.STOStrategy;
+import com.iamvtn.esper.model.Order;
+
+public class OrderSender {
+	static Thread t1;
+
+	public static Order initCust() {
+		Order orderStrategy = new Order();
+		orderStrategy.setUserId("0001");
+		orderStrategy.setAcctNo("0001000089");
+		orderStrategy.setQtty(100L);
+		return orderStrategy;
+	}
+
+	public static void main(String[] args) throws IOException, InterruptedException {
+		Order orderS = initCust();
+		consoleLog(orderS);
+
+	}
+
+	public static void consoleLog(Order orderS) throws IOException {
+		BufferedReader in = new BufferedReader(new InputStreamReader(System.in));
+		String s = null;
+
+		print();
+		while ((s = in.readLine()) != null) {
+			if (s.equalsIgnoreCase("sto")) {
+				printCustInfoSTO(orderS, in);
+				orderS.setStrategyType("STO");
+				STOStrategy.getInstance().run(orderS);
+			} else if (s.equalsIgnoreCase("so")) {
+				printCustInfoSO(orderS, in);
+				orderS.setStrategyType("SO");
+				STOStrategy.getInstance().run(orderS);
+			} else if (s.equalsIgnoreCase("to")) {
+				printCustInfoTO(orderS, in);
+				orderS.setStrategyType("TO");
+				STOStrategy.getInstance().run(orderS);
+			} else if (s.equalsIgnoreCase("stock")) {
+				printStockInfo(in);
+				if (t1 != null && t1.isAlive()) {
+					t1.interrupt();
+				}
+				t1 = new Thread(StockSender.getInstance());
+				t1.start();
+			}
+
+			print();
+		}
+	}
+
+	public static void printStockInfo(BufferedReader in) throws IOException {
+		System.out.println("Symbol: ");
+		StockSender.symbol = in.readLine();
+		System.out.println("Random price from: ");
+		StockSender.from = Long.parseLong(in.readLine());
+		System.out.println("Random price to: ");
+		StockSender.to = Long.parseLong(in.readLine());
+	}
+
+	public static void printCustInfoSTO(Order ord, BufferedReader in) throws IOException {
+		System.out.println("Symbol: ");
+		String symbol = in.readLine();
+		ord.setSymbol(symbol);
+		System.out.println("Buy Price: ");
+		String price = in.readLine();
+		ord.setPrice(Long.parseLong(price));
+		System.out.println("Stop Loss Price: ");
+		String stopPrice = in.readLine();
+		ord.setStopPrice(Long.parseLong(stopPrice));
+		System.out.println("Take Profit Price: ");
+		String takePrice = in.readLine();
+		ord.setTakePrice(Long.parseLong(takePrice));
+	}
+
+	public static void printCustInfoSO(Order ord, BufferedReader in) throws IOException {
+		System.out.println("Symbol: ");
+		String symbol = in.readLine();
+		ord.setSymbol(symbol);
+		System.out.println("Buy Price: ");
+		String price = in.readLine();
+		ord.setPrice(Long.parseLong(price));
+		System.out.println("Stop Loss Price: ");
+		String stopPrice = in.readLine();
+		ord.setStopPrice(Long.parseLong(stopPrice));
+	}
+
+	public static void printCustInfoTO(Order ord, BufferedReader in) throws IOException {
+		System.out.println("Symbol: ");
+		String symbol = in.readLine();
+		ord.setSymbol(symbol);
+		System.out.println("Buy Price: ");
+		String price = in.readLine();
+		ord.setPrice(Long.parseLong(price));
+		System.out.println("Take Profit Price: ");
+		String takePrice = in.readLine();
+		ord.setTakePrice(Long.parseLong(takePrice));
+	}
+
+	public static void print() {
+		System.out.println("===========");
+		System.out.println("type 'sto' to send order to Stop Loss and Take Profit Strategy ");
+		System.out.println("type 'so' to send order to Stop Loss Strategy ");
+		System.out.println("type 'to' to send order to Take Profit Strategy ");
+		System.out.println("type 'stock' to send random stock to Esper engine ");
+		System.out.println("type 'exit' to shut down");
+		System.out.println("===========");
+	}
+}
+
+[/code]
+
+Giờ ta hãy chạy thử lớp OrderSender và nhập thử 3 lệnh STO như sau: 
+[code]
+===========
+type 'sto' to send order to Stop Loss and Take Profit Strategy 
+type 'so' to send order to Stop Loss Strategy 
+type 'to' to send order to Take Profit Strategy 
+type 'stock' to send random stock to Esper engine 
+type 'exit' to shut down
+===========
+sto
+Symbol: 
+SSI
+Buy Price: 
+12000
+Stop Loss Price: 
+10000
+Take Profit Price: 
+20000
+Received  :acctNo: 0001000089 - userId: 0001 - buy price: 12000 - symbol: SSI - stopPrice: 10000 - takePrice: 20000 - qtty: 100
+Start STO strategy SELECT * FROM Stock(symbol='SSI') WHERE priceRF <= 10000 OR priceRF >= 20000
+===========
+type 'sto' to send order to Stop Loss and Take Profit Strategy 
+type 'so' to send order to Stop Loss Strategy 
+type 'to' to send order to Take Profit Strategy 
+type 'stock' to send random stock to Esper engine 
+type 'exit' to shut down
+===========
+so
+Symbol: 
+SSI
+Buy Price: 
+15000
+Stop Loss Price: 
+14000
+Received  :acctNo: 0001000089 - userId: 0001 - buy price: 15000 - symbol: SSI - stopPrice: 14000 - takePrice: 20000 - qtty: 100
+Start STO strategy SELECT * FROM Stock(symbol='SSI') WHERE priceRF <= 14000
+===========
+type 'sto' to send order to Stop Loss and Take Profit Strategy 
+type 'so' to send order to Stop Loss Strategy 
+type 'to' to send order to Take Profit Strategy 
+type 'stock' to send random stock to Esper engine 
+type 'exit' to shut down
+===========
+to
+Symbol: 
+SSI
+Buy Price: 
+20000
+Take Profit Price: 
+20000
+Received  :acctNo: 0001000089 - userId: 0001 - buy price: 20000 - symbol: SSI - stopPrice: 14000 - takePrice: 20000 - qtty: 100
+Start STO strategy SELECT * FROM Stock(symbol='SSI') WHERE priceRF >= 20000
+[/code]
+Bạn có thể thấy log ghi ra Esper đã nhận 3 lệnh STO với 3 giá trị EPL như sau: 
+[code]
+Received  :acctNo: 0001000089 - userId: 0001 - buy price: 12000 - symbol: SSI - stopPrice: 10000 - takePrice: 20000 - qtty: 100
+Start STO strategy SELECT * FROM Stock(symbol='SSI') WHERE priceRF <= 10000 OR priceRF >= 20000
+
+Received  :acctNo: 0001000089 - userId: 0001 - buy price: 15000 - symbol: SSI - stopPrice: 14000 - takePrice: 20000 - qtty: 100
+Start STO strategy SELECT * FROM Stock(symbol='SSI') WHERE priceRF <= 14000
+
+Received  :acctNo: 0001000089 - userId: 0001 - buy price: 20000 - symbol: SSI - stopPrice: 14000 - takePrice: 20000 - qtty: 100
+Start STO strategy SELECT * FROM Stock(symbol='SSI') WHERE priceRF >= 20000
+[/code]
+
+Sau đó ta gõ stock và sét giá trị giá chứng khoán trong khoảng 9000 đến 21000 để chương trình gửi thông tin thị trường giả lập đến Esper
+[code]
+stock
+Symbol: 
+SSI
+Random price from: 
+9000
+Random price to: 
+21000
+[/code]
+Ngay lập tức 3 listener tương ứng với 3 Esper EPL sẽ được kích hoạt ngay khi nhận được thông tin thị trường tương ứng, log sẽ ghi ra như sau: 
+[code]
+ ********************** 
+ - StopLossOrderListener received: 
+ - Rate: Symbol: SSI - priceRF: 9794
+ - Order: acctNo: 0001000089 - userId: 0001 - buy price: 20000 - symbol: SSI - stopPrice: 14000 - takePrice: 20000 - qtty: 100
+ ********************** 
+ ********************** 
+ - StopLossOrderListener received: 
+ - Rate: Symbol: SSI - priceRF: 9794
+ - Order: acctNo: 0001000089 - userId: 0001 - buy price: 20000 - symbol: SSI - stopPrice: 14000 - takePrice: 20000 - qtty: 100
+ ********************** 
+ ********************** 
+ - TakeProfitOrderListener received: 
+ - Rate: Symbol: SSI - priceRF: 20257
+ - Order: acctNo: 0001000089 - userId: 0001 - buy price: 20000 - symbol: SSI - stopPrice: 14000 - takePrice: 20000 - qtty: 100
+ ********************** 
+[/code]
+
+Vậy là ta đã tìm hiểu Esper là gì, ứng dụng của nó vào thực tế ra sao, tuy nhiên còn rất nhiều các khái niệm trong Esper còn chưa được đề cập hết ở đây, nếu bạn có hứng thú và thấy Esper phù hợp để áp dụng vào hệ thống của mình thì mời bạn hãy truy cập vào đây truy cập thêm thông tin từ Esper Tech http://www.espertech.com/esper/release-5.3.0/esper-reference/html_single/index.html 
+
+Code demo: github.com/batnam/learn-esper
