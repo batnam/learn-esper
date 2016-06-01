@@ -19,6 +19,11 @@ esper/target/
 esper/.classpath
 esper/.project
 
+matchingorder/.settings/
+matchingorder/target/
+matchingorder/.classpath
+matchingorder/.project
+
 .settings/
 
 #Eclipse file
